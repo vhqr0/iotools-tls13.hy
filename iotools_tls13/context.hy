@@ -4,7 +4,6 @@
 
 (import
   dash *
-  dash.strtools :as s
   enum
   functools [cache]
   random [randbytes]
