@@ -41,15 +41,22 @@
       ServerContextPrefix (+ (* 64 b"\x20") ServerContextString b"\x00")
       ClientContextPrefix (+ (* 64 b"\x20") ClientContextString b"\x00"))
 
-(setv DerivedLabel           b"tls13 derived"
-      ClientHandshakeLabel   b"tls13 c hs traffic"
-      ServerHandshakeLabel   b"tls13 s hs traffic"
-      ClientApplicationLabel b"tls13 c ap traffic"
-      ServerApplicationLabel b"tls13 s ap traffic"
-      FinishedLabel          b"tls13 finished"
-      KeyUpdateLabel         b"tls13 traffic upd"
-      KeyLabel               b"tls13 key"
-      IVLabel                b"tls13 iv")
+(setv DerivedLabel             b"tls13 derived"
+      ExternalBinderLabel      b"tls13 ext binder"
+      ResumptionBinderLabel    b"tls13 res binder"
+      ResumptionMasterLabel    b"tls13 res master"
+      ResumptionLabel          b"tls13 resumption"
+      ExporterMasterLabel      b"tls13 exp master"
+      EarlyExporterMasterLabel b"tls13 e exp master"
+      ClientEarlyLabel         b"tls13 c e traffic"
+      ClientHandshakeLabel     b"tls13 c hs traffic"
+      ServerHandshakeLabel     b"tls13 s hs traffic"
+      ClientApplicationLabel   b"tls13 c ap traffic"
+      ServerApplicationLabel   b"tls13 s ap traffic"
+      KeyUpdateLabel           b"tls13 traffic upd"
+      KeyLabel                 b"tls13 key"
+      IVLabel                  b"tls13 iv"
+      FinishedLabel            b"tls13 finished")
 
 
 ;;; compatibility
@@ -299,7 +306,7 @@
 (defstruct PskBinderEntry [vbytes :len 1])
 
 (defstruct PskBinderEntryList
-  [vbytes :len 1 :struct PskBinderEntry :many True])
+  [vbytes :len 2 :struct PskBinderEntry :many True])
 
 (defstruct OfferedPsks
   [[identities PskIdentityList]

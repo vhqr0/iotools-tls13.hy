@@ -4,9 +4,11 @@
 
 (import
   dash *
+  dash.strtools :as s
   enum
   functools [cache]
   random [randbytes]
+  time
   datetime
   cryptography [x509]
   cryptography.hazmat.primitives.hashes [Hash SHA256 SHA384 SHA512]
@@ -133,9 +135,9 @@
    [context [vbytes :len 1]]])
 
 (defclass CipherSuiteContextMixin []
-  (defn init-cipher-suite [self]
+  (defn init-cipher-suite-context [self cipher-suite]
     (let [#(hash-algorithm hash-block-size hash-digest-size aead-algorithm aead-key-size aead-iv-size aead-tag-size)
-          (get cipher-suite-dict self.cipher-suite)]
+          (get cipher-suite-dict cipher-suite)]
       (setv self.hash-algorithm   hash-algorithm
             self.hash-block-size  hash-block-size
             self.hash-digest-size hash-digest-size
@@ -180,16 +182,14 @@
     (.expand-key self))
 
   (defn update-key [self]
-    (let [secret (.hkdf-expand-label self.context self.secret KeyUpdateLabel b"" self.context.hash-digest-size)]
-      (setv self.secret secret))
+    (setv self.secret (.hkdf-expand-label self.context self.secret KeyUpdateLabel b"" self.context.hash-digest-size))
     (.expand-key self))
 
   (defn expand-key [self]
-    (let [key (.hkdf-expand-label self.context self.secret KeyLabel b"" self.context.aead-key-size)
-          iv  (.hkdf-expand-label self.context self.secret IVLabel  b"" self.context.aead-iv-size)]
-      (setv self.aead (self.context.aead-algorithm key)
-            self.iv iv
-            self.sequence 0)))
+    (setv self.key (.hkdf-expand-label self.context self.secret KeyLabel b"" self.context.aead-key-size)
+          self.iv (.hkdf-expand-label self.context self.secret IVLabel  b"" self.context.aead-iv-size)
+          self.aead (self.context.aead-algorithm self.key)
+          self.sequence 0))
 
   (defn next-iv [self]
     (let [iv (bytes (gfor #(c1 c2) (zip self.iv (int-pack self.sequence self.context.aead-iv-size)) (^ c1 c2)))]
@@ -282,8 +282,45 @@
          (--map (let [#(group ke) it] #(group ke.public-key)))
          list))
 
-  (defn exchange [self selected-group server-share]
-    (.exchange (get self.shares selected-group) server-share)))
+  (defn exchange [self selected-named-group server-share]
+    (.exchange (get self.shares selected-named-group) server-share)))
+
+
+
+(defclass TLS13Ticket []
+  (setv binder-label None)
+
+  (defn __init__ [self identity pre-shared-key [max-early-data-size None]]
+    (when (str? identity)
+      (setv identity (s.encode identity)))
+    (setv self.identity identity
+          self.pre-shared-key pre-shared-key
+          self.max-early-data-size max-early-data-size))
+
+  (defn [property] obfuscated-ticket-age [self] 0)
+
+  (defn [property] expired [self] False))
+
+(defclass TLS13ExternalTicket [TLS13Ticket]
+  (setv binder-label ExternalBinderLabel))
+
+(defclass TLS13ResumptionTicket [TLS13Ticket]
+  (setv binder-label ResumptionBinderLabel)
+
+  (defn __init__ [self identity pre-shared-key create-time expire-time obfuscated-ticket-age-add [max-early-data-size None]]
+    (.__init__ (super) identity pre-shared-key max-early-data-size)
+    (setv self.create-time create-time
+          self.expire-time expire-time
+          self.obfuscated-ticket-age-add obfuscated-ticket-age-add))
+
+  (defn [property] ticket-time [self]
+    (- (time.time) self.create-time))
+
+  (defn [property] obfuscated-ticket-age [self]
+    (& (+ (int (* self.ticket-time 1000)) self.obfuscated-ticket-age-add) 0xffffffff))
+
+  (defn [property] expired [self]
+    (> (time.time) self.expire-time)))
 
 
 
@@ -301,17 +338,21 @@
 (defclass TLS13Context [CipherSuiteContextMixin]
   (defn __init__ [self
                   server-hostname
+                  [ticket None]
+                  [early-data b""]
                   [server-cafile None]
                   [server-verify True]
-                  [server-alpn-protocols None]
+                  [application-protocols None]
                   [signature-algorithms (list signature-algorithm-dict)]
                   [cipher-suites (list cipher-suite-dict)]
                   [named-groups (list named-group-dict)]]
     (setv self.status TLS13Status.START
           self.server-hostname server-hostname
+          self.ticket ticket
+          self.early-data early-data
           self.server-cafile server-cafile
           self.server-verify server-verify
-          self.server-alpn-protocols server-alpn-protocols
+          self.application-protocols application-protocols
           self.signature-algorithms signature-algorithms
           self.cipher-suites cipher-suites
           self.named-groups named-groups
@@ -320,13 +361,11 @@
           self.handshake-messages (list)
           self.handshake-read-encrypted False
           self.handshake-write-buffer (Buffer)
+          self.handshake-ticket-accepted False
+          self.handshake-early-data-accepted False
           self.application-key-update-requested False))
 
-  (defn send-plaintext [self type version content]
-    (.write self.handshake-write-buffer (Plaintext.pack #(type version content))))
-
-  (defn send-ciphertext [self type content]
-    (.write self.handshake-write-buffer (.encrypt-record self.client-handshake-encryptor type content)))
+  ;;; record
 
   (defn recv-record [self type version content]
     (when (and self.handshake-read-encrypted (!= type ContentType.change-cipher-spec))
@@ -339,9 +378,29 @@
            ContentType.alert              (.recv-alert              self content)
            _ (raise RuntimeError)))
 
+  ;; client hello, change cipher spec
+  (defn send-plaintext [self type version content]
+    (.write self.handshake-write-buffer (Plaintext.pack #(type version content))))
+
+  ;; client finished
+  (defn send-ciphertext [self type content]
+    (.write self.handshake-write-buffer (.encrypt-record self.client-handshake-encryptor type content)))
+
+  ;; early data, end of early data
+  (defn send-early-ciphertext [self type content]
+    (.write self.handshake-write-buffer (.encrypt-record self.client-early-encryptor type content)))
+
+  ;; post handshake early data
+  (defn send-application-ciphertext [self type content]
+    (.write self.handshake-write-buffer (.encrypt-record self.client-application-encryptor type content)))
+
+  ;;; alert
+
   (defn recv-alert [self alert]
     (let [#(level description) (Alert.unpack alert)]
       (raise (RuntimeError description.name))))
+
+  ;;; change cipher spec
 
   (defn recv-change-cipher-spec [self change-cipher-spec]
     (unless (and (= self.status TLS13Status.WAIT-CCS-EE)
@@ -352,6 +411,8 @@
   (defn send-change-cipher-spec [self]
     (let [change-cipher-spec (ChangeCipherSpec.pack ChangeCipherSpec.change-cipher-spec)]
       (.send-plaintext self ContentType.change-cipher-spec ProtocolVersion.TLS12 change-cipher-spec)))
+
+  ;;; handshake
 
   (defn recv-handshakes [self handshakes]
     (--each (Handshake.unpack-many handshakes)
@@ -365,16 +426,6 @@
                       HandshakeType.finished             self.recv-finished
                       _ (raise RuntimeError))
                 msg-data))))
-
-  (defn send-handshake-plaintext [self version msg-type msg-data]
-    (let [handshake (Handshake.pack #(msg-type msg-data))]
-      (.append self.handshake-messages handshake)
-      (.send-plaintext self ContentType.handshake version handshake)))
-
-  (defn send-handshake-ciphertext [self msg-type msg-data]
-    (let [handshake (Handshake.pack #(msg-type msg-data))]
-      (.append self.handshake-messages handshake)
-      (.send-ciphertext self ContentType.handshake handshake)))
 
   (defn [property] supported-versions-extension [self]
     #(ExtensionType.supported-versions (SupportedVersionsClientHello.pack [ProtocolVersion.TLS13])))
@@ -392,7 +443,18 @@
     #(ExtensionType.server-name (ServerNameHostList.pack [#(NameType.host-name self.server-hostname)])))
 
   (defn [property] application-layer-protocol-negotiation-extension [self]
-    #(ExtensionType.application-layer-protocol-negotiation (ProtocolNameList.pack self.server-alpn-protocols)))
+    #(ExtensionType.application-layer-protocol-negotiation (ProtocolNameList.pack self.application-protocols)))
+
+  (defn [property] early-data-extension [self]
+    #(ExtensionType.early-data b""))
+
+  (defn [property] psk-key-exchange-modes-extension [self]
+    #(ExtensionType.psk-key-exchange-modes (PskKeyExchangeModes.pack #(PskKeyExchangeMode.psk-dhe-ke))))
+
+  (defn [property] pre-shared-key-extension [self]
+    #(ExtensionType.pre-shared-key (PreSharedKeyExtensionClientHello.pack
+                                     #([#(self.ticket.identity self.ticket.obfuscated-ticket-age)]
+                                        [(bytes self.hash-digest-size)]))))
 
   (defn [property] extensions [self]
     (let [extensions (list)]
@@ -401,23 +463,53 @@
       (.append extensions self.supported-groups-extension)
       (.append extensions self.key-share-extension)
       (.append extensions self.server-name-extension)
-      (when self.server-alpn-protocols
+      (when self.application-protocols
         (.append extensions self.application-layer-protocol-negotiation-extension))
+      (when self.ticket
+        (when self.early-data
+          (.append extensions self.early-data-extension))
+        (.append extensions self.psk-key-exchange-modes-extension)
+        (.append extensions self.pre-shared-key-extension))
       extensions))
 
   (defn send-client-hello [self]
     (unless (= self.status TLS13Status.START)
       (raise RuntimeError))
     (setv self.status TLS13Status.WAIT-SH)
-    (let [client-hello (ClientHello.pack
-                         #(ProtocolVersion.TLS12      ; legacy version
-                            self.client-random        ; random
-                            b""                       ; legacy session id
-                            self.cipher-suites        ; cipher suites
-                            #(CompressionMethod.null) ; legacy compression method
-                            self.extensions           ; extensions
-                            ))]
-      (.send-handshake-plaintext self ProtocolVersion.TLS12 HandshakeType.client-hello client-hello)))
+
+    (when self.ticket
+      (setv self.selected-cipher-suite (get self.cipher-suites 0))
+      (.init-cipher-suite-context self self.selected-cipher-suite)
+      (setv self.early-secret (.hkdf-extract self (bytes self.hash-digest-size) self.ticket.pre-shared-key)))
+
+    (let [client-hello (Handshake.pack
+                         #(HandshakeType.client-hello
+                            (ClientHello.pack
+                              #(ProtocolVersion.TLS12      ; legacy version
+                                 self.client-random        ; random
+                                 b""                       ; legacy session id
+                                 self.cipher-suites        ; cipher suites
+                                 #(CompressionMethod.null) ; legacy compression method
+                                 self.extensions           ; extensions
+                                 ))))]
+      (when self.ticket
+        (let [truncated-client-hello (cut client-hello (- (+ self.hash-digest-size 3)))]
+          (setv self.binder-key (.hkdf-derive-secret self self.early-secret self.ticket.binder-label b"")
+                self.binder-verify-key (.hkdf-expand-label self self.binder-key FinishedLabel b"" self.hash-digest-size)
+                self.binder-verify-data (.hmac self self.binder-verify-key (.hash self truncated-client-hello)))
+          (setv client-hello (+ truncated-client-hello (PskBinderEntryList.pack [self.binder-verify-data])))))
+      (.append self.handshake-messages client-hello)
+      (.send-plaintext self ContentType.handshake ProtocolVersion.TLS12 client-hello))
+
+    (when (and self.ticket self.early-data)
+      (when (and self.ticket.max-early-data-size (> (len self.early-data) self.ticket.max-early-data-size))
+        (raise RuntimeError))
+      (setv self.client-early-secret (.hkdf-derive-secret self self.early-secret ClientEarlyLabel self.handshake-messages)
+            self.client-early-encryptor (Cryptor self self.client-early-secret))
+      (.send-early-data self)))
+
+  (defn send-early-data [self]
+    (.send-early-ciphertext self ContentType.application-data self.early-data))
 
   (defn recv-server-hello [self server-hello]
     (unless (= self.status TLS13Status.WAIT-SH)
@@ -427,23 +519,29 @@
     (let [#(legacy-version random legacy-session-id-echo cipher-suite legacy-compression-method extensions) (ServerHello.unpack server-hello)
           extensions (dict extensions)
           selected-version (SupportedVersionsServerHello.unpack (get extensions ExtensionType.supported-versions))
-          #(selected-group share) (KeyShareServerHello.unpack (get extensions ExtensionType.key-share))]
+          #(selected-named-group server-share) (KeyShareServerHello.unpack (get extensions ExtensionType.key-share))]
       (unless (and (= legacy-session-id-echo b"")
                    (= selected-version ProtocolVersion.TLS13)
                    (!= random HelloRetryRequestRandom)
                    (in cipher-suite self.cipher-suites)
-                   (in selected-group self.named-groups))
+                   (in selected-named-group self.named-groups))
         (raise RuntimeError))
-      (setv self.server-random random
-            self.server-extensions extensions
-            self.cipher-suite cipher-suite
-            self.selected-group selected-group
-            self.server-share share))
+      (when self.ticket
+        (when-let [it (-get extensions ExtensionType.pre-shared-key)]
+          (let [selected-identity (PreSharedKeyExtensionServerHello.unpack it)]
+            (unless (and (= selected-identity 0) (= cipher-suite self.selected-cipher-suite))
+              (raise RuntimeError))
+            (setv self.handshake-ticket-accepted True))))
+      (unless self.handshake-ticket-accepted
+        (setv self.selected-cipher-suite cipher-suite)
+        (.init-cipher-suite-context self self.selected-cipher-suite)
+        (setv self.early-secret (.hkdf-extract self (bytes self.hash-digest-size) (bytes self.hash-digest-size))))
+      (setv self.selected-named-group selected-named-group
+            self.server-random random
+            self.server-share server-share
+            self.server-extensions extensions))
 
-    (.init-cipher-suite self)
-
-    (setv self.shared-secret (.exchange self.client-shares self.selected-group self.server-share)
-          self.early-secret (.hkdf-extract self (bytes self.hash-digest-size) (bytes self.hash-digest-size))
+    (setv self.shared-secret (.exchange self.client-shares self.selected-named-group self.server-share)
           self.handshake-secret (.hkdf-extract self (.hkdf-derive-secret self self.early-secret DerivedLabel b"") self.shared-secret)
           self.client-handshake-secret (.hkdf-derive-secret self self.handshake-secret ClientHandshakeLabel self.handshake-messages)
           self.server-handshake-secret (.hkdf-derive-secret self self.handshake-secret ServerHandshakeLabel self.handshake-messages)
@@ -455,14 +553,18 @@
   (defn recv-encrypted-extensions [self encrypted-extensions]
     (unless (in self.status #(TLS13Status.WAIT-CCS-EE TLS13Status.WAIT-EE))
       (raise RuntimeError))
-    (setv self.status TLS13Status.WAIT-CERT-CR)
+    (setv self.status (if self.handshake-ticket-accepted TLS13Status.WAIT-FINISHED TLS13Status.WAIT-CERT-CR))
     (let [extensions (EncryptedExtensions.unpack encrypted-extensions)]
       (setv self.server-encrypted-extensions (dict extensions)))
-    (when-let [it (-get self.server-encrypted-extensions ExtensionType.application-layer-protocol-negotiation)]
-      (let [#(selected-alpn-protocol) (ProtocolNameList.unpack it)]
-        (unless (in selected-alpn-protocol self.server-alpn-protocols)
-          (raise RuntimeError))
-        (setv self.selected-alpn-protocol selected-alpn-protocol))))
+    (when self.application-protocols
+      (when-let [it (-get self.server-encrypted-extensions ExtensionType.application-layer-protocol-negotiation)]
+        (let [#(selected-application-protocol) (ProtocolNameList.unpack it)]
+          (unless (in selected-application-protocol self.application-protocols)
+            (raise RuntimeError))
+          (setv self.selected-application-protocol selected-application-protocol))))
+    (when (and self.handshake-ticket-accepted self.early-data)
+      (when (in ExtensionType.early-data self.server-encrypted-extensions)
+        (setv self.handshake-early-data-accepted True))))
 
   (defn recv-certificate [self certificate]
     (unless (in self.status #(TLS13Status.WAIT-CERT-CR TLS13Status.WAIT-CERT))
@@ -487,9 +589,9 @@
             self.server-signature-context (.hash self (cut self.handshake-messages -1))
             self.server-signature-data (+ ServerContextPrefix self.server-signature-context)))
     (when self.server-verify
-      (.do-server-verify self)))
+      (.verify-server self)))
 
-  (defn do-server-verify [self]
+  (defn verify-server [self]
     (let [#(leaf #* intermediates) self.server-certificates]
       (let [signature-verifier ((get signature-algorithm-dict self.server-signature-algorithm) (.public-key leaf))]
         (.verify signature-verifier self.server-signature self.server-signature-data))
@@ -500,22 +602,41 @@
     (unless (= self.status TLS13Status.WAIT-FINISHED)
       (raise RuntimeError))
     (setv self.status TLS13Status.CONNECTED)
+
     (setv self.server-verify-key (.hkdf-expand-label self self.server-handshake-secret FinishedLabel b"" self.hash-digest-size)
-          self.client-verify-key (.hkdf-expand-label self self.client-handshake-secret FinishedLabel b"" self.hash-digest-size)
-          self.server-verify-data (.hmac self self.server-verify-key (.hash self (cut self.handshake-messages -1)))
-          self.client-verify-data (.hmac self self.client-verify-key (.hash self self.handshake-messages)))
+          self.server-verify-data (.hmac self self.server-verify-key (.hash self (cut self.handshake-messages -1))))
     (unless (= finished self.server-verify-data)
       (raise RuntimeError))
+
     (setv self.master-secret (.hkdf-extract self (.hkdf-derive-secret self self.handshake-secret DerivedLabel b"") (bytes self.hash-digest-size))
           self.client-application-secret (.hkdf-derive-secret self self.master-secret ClientApplicationLabel self.handshake-messages)
           self.server-application-secret (.hkdf-derive-secret self self.master-secret ServerApplicationLabel self.handshake-messages)
           self.client-application-encryptor (Cryptor self self.client-application-secret)
           self.server-application-decryptor (Cryptor self self.server-application-secret))
+
+    (when self.handshake-early-data-accepted
+      (.send-end-of-early-data self))
+
+    (setv self.client-verify-key (.hkdf-expand-label self self.client-handshake-secret FinishedLabel b"" self.hash-digest-size)
+          self.client-verify-data (.hmac self self.client-verify-key (.hash self self.handshake-messages)))
+
     (.send-change-cipher-spec self)
-    (.send-finished self))
+    (.send-finished self)
+    (when (and self.early-data (not self.handshake-early-data-accepted))
+      (.send-post-handshake-early-data self)))
 
   (defn send-finished [self]
-    (.send-handshake-ciphertext self HandshakeType.finished self.client-verify-data))
+    (let [finished (Handshake.pack #(HandshakeType.finished self.client-verify-data))]
+      (.append self.handshake-messages finished)
+      (.send-ciphertext self ContentType.handshake finished)))
+
+  (defn send-end-of-early-data [self]
+    (let [end-of-early-data (Handshake.pack #(HandshakeType.end-of-early-data b""))]
+      (.append self.handshake-messages end-of-early-data)
+      (.send-early-ciphertext self ContentType.handshake end-of-early-data)))
+
+  (defn send-post-handshake-early-data [self]
+    (.send-application-ciphertext self ContentType.application-data self.early-data))
 
   (defn recv-key-update [self key-update]
     (unless (= self.status TLS13Status.CONNECTED)
@@ -528,9 +649,76 @@
   (defn recv-new-session-ticket [self new-session-ticket]
     (unless (= self.status TLS13Status.CONNECTED)
       (raise RuntimeError))
-    (setv self.new-session-ticket new-session-ticket)))
+    (setv self.resumption-master-secret (.hkdf-derive-secret self self.master-secret ResumptionMasterLabel self.handshake-messages))
+    (let [#(ticket-lifetime ticket-age-add ticket-nonce ticket extensions) (NewSessionTicket.unpack new-session-ticket)
+          extensions (dict extensions)
+          pre-shared-key (.hkdf-expand-label self self.resumption-master-secret ResumptionLabel ticket-nonce self.hash-digest-size)
+          create-time (time.time)
+          expire-time (+ (/ ticket-lifetime 1000) create-time)
+          max-early-data-size None]
+      (when-let [it (-get extensions ExtensionType.early-data)]
+        (setv max-early-data-size (EarlyDataIndicationNewSessionTicket.unpack it)))
+      (setv self.new-session-ticket (TLS13ResumptionTicket
+                                      :identity ticket
+                                      :pre-shared-key pre-shared-key
+                                      :create-time create-time
+                                      :expire-time expire-time
+                                      :obfuscated-ticket-age-add ticket-age-add
+                                      :max-early-data-size max-early-data-size)))))
+
+
+
+(defclass TLS13Session []
+  (defn __init__ [self
+                  server-hostname
+                  [ticket None]
+                  [server-cafile None]
+                  [server-verify True]
+                  [application-protocol None]
+                  [signature-algorithms (list signature-algorithm-dict)]
+                  [cipher-suite CipherSuite.TLS-AES-128-GCM-SHA256]
+                  [named-group NamedGroup.x25519]]
+    (setv self.server-hostname server-hostname
+          self.ticket ticket
+          self.server-cafile server-cafile
+          self.server-verify server-verify
+          self.application-protocol application-protocol
+          self.signature-algorithms signature-algorithms
+          self.cipher-suite cipher-suite
+          self.named-group named-group))
+
+  (defn [classmethod] from-external [cls
+                                     server-hostname
+                                     [pre-shared-key-identity "psk"]
+                                     [pre-shared-key None]
+                                     #** kwargs]
+    (cls :server-hostname server-hostname
+         :ticket (when pre-shared-key (TLS13ExternalTicket pre-shared-key-identity pre-shared-key))
+         #** kwargs))
+
+  (defn [classmethod] from-context [cls context]
+    (cls :server-hostname context.server-hostname
+         :ticket (when (hasattr context "new_session_ticket") context.new-session-ticket)
+         :server-cafile context.server-cafile
+         :server-verify context.server-verify
+         :application-protocol (when (hasattr context "selected_application_protocol") context.selected-application-protocol)
+         :signature-algorithms context.signature-algorithms
+         :cipher-suite context.selected-cipher-suite
+         :named-group context.selected-named-group))
+
+  (defn create-context [self #** kwargs]
+    (TLS13Context
+      :server-hostname self.server-hostname
+      :ticket (when (and self.ticket (not self.ticket.expired)) self.ticket)
+      :server-cafile self.server-cafile
+      :server-verify self.server-verify
+      :application-protocols (when self.application-protocol [self.application-protocol])
+      :signature-algorithms self.signature-algorithms
+      :cipher-suites [self.cipher-suite]
+      :named-groups [self.named-group]
+      #** kwargs)))
 
 
 
 (export
-  :objects [TLS13Status TLS13Context])
+  :objects [TLS13Status TLS13Context TLS13Session])
