@@ -38,14 +38,14 @@
         (print "error while serving:" e)
         (raise)))))
 
-(defn/a run-tls-client [[data b"hello"] [host "localhost"] [port 4433]]
+(defn/a run-tls-client [context [data b"hello"] [host "localhost"] [port 4433]]
   (with/a [tcp-stream (await (AsyncTCPStream.open host port))]
-    (let [context (TLS13Context :server-hostname "localhost" :server-cafile CERTFILE)]
-      (with/a [tls13-stream (await (.handshake (AsyncTLS13Connector context) tcp-stream))]
+    (with/a [tls13-stream (await (.handshake (AsyncTLS13Connector context) tcp-stream))]
+      (when data
         (await (.tls13-write-key-update tls13-stream))
         (await (.write tls13-stream data))
-        (await (.flush tls13-stream))
-        (await (.read tls13-stream))))))
+        (await (.flush tls13-stream)))
+      (await (.read tls13-stream)))))
 
 (defclass TestTLS13 [IsolatedAsyncioTestCase]
   (setv port 4433)
@@ -58,7 +58,16 @@
     (.cancel self.task))
 
   (defn/a test-tls13 [self]
-    (.assertEqual self (await (run-tls-client :data b"hello" :port self.port)) b"hello")))
+    (let [context (TLS13Context :server-hostname "localhost" :server-cafile CERTFILE)]
+      (.assertEqual self (await (run-tls-client context :data b"hello" :port self.port)) b"hello")
+      (.assertFalse self context.handshake-ticket-accepted)
+      (let [session (TLS13Session.from-context context)]
+        (setv context (.create-context session :early-data b"hello"))
+        (.assertEqual self (await (run-tls-client context :data b"" :port self.port)) b"hello")
+        ;; TODO: server doesn't support psk
+        ;; (.assertTrue self context.handshake-ticket-accepted)
+        ;; (.assertTrue self context.handshake-early-data-accepted)
+        ))))
 
 (export
   :objects [TestTLS13])
