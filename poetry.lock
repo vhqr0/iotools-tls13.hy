@@ -130,22 +130,18 @@ test = ["certifi", "pretend", "pytest (>=6.2.0)", "pytest-benchmark", "pytest-co
 test-randomorder = ["pytest-randomly"]
 
 [[package]]
-name = "dash"
+name = "dash-hy"
 version = "0.1.0"
 description = "A modern list library for Hy"
 optional = false
-python-versions = ">=3.11,<3.13"
-files = []
-develop = false
+python-versions = ">=3.12,<3.13"
+files = [
+    {file = "dash_hy-0.1.0-py3-none-any.whl", hash = "sha256:aade482e7f151ba96686d5046d27add400b9fdbd7585a85c773e093e0da81271"},
+    {file = "dash_hy-0.1.0.tar.gz", hash = "sha256:32962d37353bbc847253a86f59fc13083edb95875ddc3fc6dec0e99933e601fa"},
+]
 
 [package.dependencies]
-hy = "^0.27.0"
-
-[package.source]
-type = "git"
-url = "https://github.com/vhqr0/dash.hy.git"
-reference = "4a1bb9711082dead092a837d449da6d72dd8a91a"
-resolved_reference = "4a1bb9711082dead092a837d449da6d72dd8a91a"
+hy = ">=0.28.0,<0.29.0"
 
 [[package]]
 name = "funcparserlib"
@@ -160,35 +156,31 @@ files = [
 
 [[package]]
 name = "hy"
-version = "0.27.0"
+version = "0.28.0"
 description = "A Lisp dialect embedded in Python"
 optional = false
 python-versions = ">= 3.8, < 3.13"
 files = [
-    {file = "hy-0.27.0.tar.gz", hash = "sha256:5d646e32b01fea740057b856639c672489d27ec7f9cc882363951c748d2b5ceb"},
+    {file = "hy-0.28.0.tar.gz", hash = "sha256:ae202f0b5e9094489af2a41b2cee9e0f776d0572da69cb108db2935a7224e17a"},
 ]
 
 [package.dependencies]
 funcparserlib = ">=1.0,<2.0"
 
 [[package]]
-name = "iotools"
+name = "iotools-hy"
 version = "0.1.0"
-description = "IO tools for hy"
+description = "IO tools for Hy"
 optional = false
-python-versions = ">=3.11,<3.13"
-files = []
-develop = false
+python-versions = ">=3.12,<3.13"
+files = [
+    {file = "iotools_hy-0.1.0-py3-none-any.whl", hash = "sha256:a41bf93898328ef619c138effa2885c9f207969f1a5917cb1359c45ab1338e89"},
+    {file = "iotools_hy-0.1.0.tar.gz", hash = "sha256:7e88e11cf2dbf0e7d50a50443e7a95728b4e303deca7aa84fef440c6e37126be"},
+]
 
 [package.dependencies]
-dash = {git = "https://github.com/vhqr0/dash.hy.git", rev = "4a1bb9711082dead092a837d449da6d72dd8a91a"}
-hy = "^0.27.0"
-
-[package.source]
-type = "git"
-url = "https://github.com/vhqr0/iotools.hy.git"
-reference = "720e88f87d1b466f1304cee0dbb3a3b0a55847b2"
-resolved_reference = "720e88f87d1b466f1304cee0dbb3a3b0a55847b2"
+dash-hy = ">=0.1.0,<0.2.0"
+hy = ">=0.28.0,<0.29.0"
 
 [[package]]
 name = "pycparser"
@@ -203,5 +195,5 @@ files = [
 
 [metadata]
 lock-version = "2.0"
-python-versions = ">=3.11,<3.13"
-content-hash = "fabd78b1af3d127ac4d69cfd3ff513765ab151103338c529127fc16ab2ab3897"
+python-versions = ">=3.12,<3.13"
+content-hash = "821a9bbcc4bcf61837dbd63ce0b75b6679da22254d13b8c29d2bd477f5fdf4ce"

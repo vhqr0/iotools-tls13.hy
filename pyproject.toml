@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "iotools-tls13"
+name = "iotools-tls13-hy"
 version = "0.1.0"
 description = "Pure Python implementation of TLS1.3 for iotools"
 authors = ["vhqr0 <zq_cmd@163.com>"]
@@ -7,12 +7,12 @@ readme = "readme.org"
 packages = [{include = "iotools_tls13"}]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<3.13"
-hy = "^0.27.0"
+python = ">=3.12,<3.13"
+hy = "^0.28.0"
 cryptography = "^42.0.0"
 certifi = ">=2023.7.22"
-dash = {git = "https://github.com/vhqr0/dash.hy.git", rev = "4a1bb9711082dead092a837d449da6d72dd8a91a"}
-iotools = {git = "https://github.com/vhqr0/iotools.hy.git", rev = "720e88f87d1b466f1304cee0dbb3a3b0a55847b2"}
+dash-hy = "^0.1.0"
+iotools-hy = "^0.1.0"
 
 [build-system]
 requires = ["poetry-core"]
