@@ -1,0 +1,14 @@
+#+TITLE: iotools-tls13.hy
+
+Pure Python implementation of client side TLS1.3 protocol for iotools.
+
+Unsupported features:
+
+- Renegotiation: HRR (Hello Retry Request), it's stupid.
+- Complex server verfication: just verify server certificate chian and
+  signature, ignore more complex mechanism such as status request.
+- Client verification: CR (Certificate Request) and PHA (Post
+  Handshake Auth), do it on application layer.
+- Limited PSK mechanism: currently only support one PSK with
+  PSK-DHE-KE mode, and when use PSK, assert only one cipher suite was
+  specified.
